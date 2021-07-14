@@ -28,9 +28,10 @@ impl<'a> VlanSlice<'a> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InternetSlice<'a> {
-    Ipv4(Ipv4HeaderSlice<'a>),
-    ///First element is the Ipv6 header slice and second one are the Ipv6 extensions headers filled in order from 0 to the length of the array.
-    Ipv6(Ipv6HeaderSlice<'a>, [Option<(u8, Ipv6ExtensionHeaderSlice<'a>)>; IPV6_MAX_NUM_HEADER_EXTENSIONS]),
+    /// The ipv6 header & the decoded extension headers.
+    Ipv4(Ipv4HeaderSlice<'a>, Ipv4ExtensionSlices<'a>),
+    /// The ipv6 header & the decoded extension headers.
+    Ipv6(Ipv6HeaderSlice<'a>, Ipv6ExtensionSlices<'a>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -38,7 +39,9 @@ pub enum TransportSlice<'a> {
     ///A slice containing an UDP header.
     Udp(UdpHeaderSlice<'a>),
     ///A slice containing a TCP header.
-    Tcp(TcpHeaderSlice<'a>)
+    Tcp(TcpHeaderSlice<'a>),
+    ///Unknonwn transport layer protocol. The value is the last parsed ip protocol number.
+    Unknown(u8),
 }
 
 ///A sliced into its component headers. Everything that could not be parsed is stored in a slice in the field "payload".
@@ -47,6 +50,12 @@ pub struct SlicedPacket<'a> {
     pub link: Option<LinkSlice<'a>>,
     pub vlan: Option<VlanSlice<'a>>,
     pub ip: Option<InternetSlice<'a>>,
+    /// IP Extension headers present after the ip header. 
+    ///
+    /// In case of IPV4 these can be ipsec authentication & encapsulated
+    /// security headers. In case of IPv6 these are the ipv6 extension headers.
+    /// The headers are in the same order as they are written to the packet.
+    //pub ip_extensions: [Option<IpExtensionHeaderSlice<'a>>;IP_MAX_NUM_HEADER_EXTENSIONS],
     pub transport: Option<TransportSlice<'a>>,
     /// The payload field points to the rest of the packet that could not be parsed by etherparse.
     ///
@@ -64,9 +73,6 @@ const ETH_IPV6: u16 = EtherType::Ipv6 as u16;
 const ETH_VLAN: u16 = EtherType::VlanTaggedFrame as u16;
 const ETH_BRIDGE: u16 = EtherType::ProviderBridging as u16;
 const ETH_VLAN_DOUBLE: u16 = EtherType::VlanDoubleTaggedFrame as u16;
-
-const IP_UDP: u8 = IpTrafficClass::Udp as u8;
-const IP_TCP: u8 = IpTrafficClass::Tcp as u8;
 
 impl<'a> SlicedPacket<'a> {
     /// Seperates a network packet slice into different slices containing the headers from the ethernet header downwards. 
@@ -166,6 +172,7 @@ impl<'a> CursorSlice<'a> {
                 link: None,
                 vlan: None,
                 ip: None,
+                //ip_extensions: [None;IP_MAX_NUM_HEADER_EXTENSIONS],
                 transport: None,
                 payload: slice
             }
@@ -175,6 +182,11 @@ impl<'a> CursorSlice<'a> {
     fn move_by_slice(&mut self, other: &'a[u8]) {
         self.slice = &self.slice[other.len()..];
         self.offset += other.len();
+    }
+
+    fn move_to_slice(&mut self, other: &'a[u8]) {
+        self.offset += self.slice.len() - other.len();
+        self.slice = other;
     }
 
     pub fn slice_ethernet2(mut self) -> Result<SlicedPacket<'a>, ReadError> {
@@ -267,22 +279,31 @@ impl<'a> CursorSlice<'a> {
     pub fn slice_ipv4(mut self) -> Result<SlicedPacket<'a>, ReadError> {
         use crate::InternetSlice::*;
 
-        let result = Ipv4HeaderSlice::from_slice(self.slice)
-                     .map_err(|err| 
-                        err.add_slice_offset(self.offset)
-                     )?;
+        let ip_header = Ipv4HeaderSlice::from_slice(self.slice)
+                        .map_err(|err| 
+                            err.add_slice_offset(self.offset)
+                        )?;
+        // move the slice
+        self.move_by_slice(ip_header.slice());
 
-        //cache protocol for later
-        let protocol = result.protocol();
+        // slice extensions
+        let (ip_ext, protocol, rest) = Ipv4ExtensionSlices::from_slice(ip_header.protocol(), self.slice)
+                                       .map_err(|err| 
+                                            err.add_slice_offset(self.offset)
+                                       )?;
 
-        //set the new data
-        self.move_by_slice(result.slice());
-        self.result.ip = Some(Ipv4(result));
+        // set the new data 
+        self.move_to_slice(rest);
+        self.result.ip = Some(Ipv4(ip_header, ip_ext));
 
         match protocol {
-            IP_UDP => self.slice_udp(),
-            IP_TCP => self.slice_tcp(),
-            _ => self.slice_payload()
+            ip_number::UDP => self.slice_udp(),
+            ip_number::TCP => self.slice_tcp(),
+            value => {
+                use TransportSlice::*;
+                self.result.transport = Some(Unknown(value));
+                self.slice_payload()
+            }
         }
     }
 
@@ -298,43 +319,23 @@ impl<'a> CursorSlice<'a> {
         self.move_by_slice(ip.slice());
 
         //extension headers
-        let mut ip_extensions = [None, None, None, None, None, 
-                                 None, None, None, None, None,
-                                 None, None];
+        let (ip_ext, next_header, rest) = Ipv6ExtensionSlices::from_slice(ip.next_header(), self.slice)
+                                          .map_err(|err| 
+                                              err.add_slice_offset(self.offset)
+                                          )?;
 
-        let mut next_header = ip.next_header();
-        for extension_header in ip_extensions.iter_mut() {
-            if !IpTrafficClass::is_ipv6_ext_header_value(next_header) {
-                break;
-            } else {
-                let ext = Ipv6ExtensionHeaderSlice::from_slice(next_header, self.slice)
-                          .map_err(|err| 
-                            err.add_slice_offset(self.offset)
-                          )?;
+        // set the new data 
+        self.move_to_slice(rest);
+        self.result.ip = Some(Ipv6(ip, ip_ext));
 
-                //move the slice
-                self.move_by_slice(ext.slice());
-
-                //save the result
-                let ext_protocol = next_header;
-                next_header = ext.next_header();
-                *extension_header = Some((ext_protocol, ext));
-            }
-        }
-
-        //parse the underlying protocol (or error in case of too many extension headers)
-        if IpTrafficClass::is_ipv6_ext_header_value(next_header)
-        {
-            Err(ReadError::Ipv6TooManyHeaderExtensions)
-        } else {
-            //save the result
-            self.result.ip = Some(Ipv6(ip, ip_extensions));
-
-            //parse the data bellow
-            match next_header {
-                IP_UDP => self.slice_udp(),
-                IP_TCP => self.slice_tcp(),
-                _ => self.slice_payload()
+        //parse the data bellow
+        match next_header {
+            ip_number::UDP => self.slice_udp(),
+            ip_number::TCP => self.slice_tcp(),
+            value => {
+                use TransportSlice::*;
+                self.result.transport = Some(Unknown(value));
+                self.slice_payload()
             }
         }
     }

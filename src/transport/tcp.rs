@@ -4,8 +4,6 @@ extern crate byteorder;
 use self::byteorder::{ByteOrder, BigEndian, ReadBytesExt, WriteBytesExt};
 use std::fmt::{Debug, Formatter};
 
-//TODO checksum calculation
-
 ///The minimum size of the tcp header in bytes
 pub const TCP_MINIMUM_HEADER_SIZE: usize = 5*4;
 ///The minimum data offset size (size of the tcp header itself).
@@ -134,7 +132,7 @@ impl TcpHeader {
         use crate::TcpOptionElement::*;
         let required_length = options.iter().fold(0, |acc, ref x| {
             acc + match x {
-                Nop => 1,
+                Noop => 1,
                 MaximumSegmentSize(_) => 4,
                 WindowScale(_) => 3,
                 SelectiveAcknowledgementPermitted => 2,
@@ -162,15 +160,16 @@ impl TcpHeader {
             //note to whoever: I would have prefered to use std::io::Cursor as it would be less error 
             //                 prone. But just in case that "no std" support is added later lets
             //                 not not rewrite it just yet with cursor.
+            use tcp_option::*;
             let mut i = 0;
             for element in options {
                 match element {
-                    Nop => {
-                        self.options_buffer[i] = TCP_OPTION_ID_NOP;
+                    Noop => {
+                        self.options_buffer[i] = KIND_NOOP;
                         i += 1;
                     },
                     MaximumSegmentSize(value) => {
-                        self.options_buffer[i] = TCP_OPTION_ID_MAXIMUM_SEGMENT_SIZE;
+                        self.options_buffer[i] = KIND_MAXIMUM_SEGMENT_SIZE;
                         i += 1;
                         self.options_buffer[i] = 4;
                         i += 1;
@@ -178,7 +177,7 @@ impl TcpHeader {
                         i += 2;
                     },
                     WindowScale(value) => {
-                        self.options_buffer[i] = TCP_OPTION_ID_WINDOW_SCALE;
+                        self.options_buffer[i] = KIND_WINDOW_SCALE;
                         i += 1;
                         self.options_buffer[i] = 3;
                         i += 1;
@@ -186,13 +185,13 @@ impl TcpHeader {
                         i += 1;
                     },
                     SelectiveAcknowledgementPermitted => {
-                        self.options_buffer[i] = TCP_OPTION_ID_SELECTIVE_ACK_PERMITTED;
+                        self.options_buffer[i] = KIND_SELECTIVE_ACK_PERMITTED;
                         i += 1;
                         self.options_buffer[i] = 2;
                         i += 1;
                     },
                     SelectiveAcknowledgement(first, rest) => {
-                        self.options_buffer[i] = TCP_OPTION_ID_SELECTIVE_ACK;
+                        self.options_buffer[i] = KIND_SELECTIVE_ACK;
                         i += 1;
 
                         //write the length
@@ -224,7 +223,7 @@ impl TcpHeader {
                         }
                     },
                     Timestamp(a, b) =>  {
-                        self.options_buffer[i] = TCP_OPTION_ID_TIMESTAMP;
+                        self.options_buffer[i] = KIND_TIMESTAMP;
                         i += 1;
                         self.options_buffer[i] = 10;
                         i += 1;
@@ -406,18 +405,18 @@ impl TcpHeader {
                                       u64::from( BigEndian::read_u16(&source_ip[2..4]) ) +
                                       u64::from( BigEndian::read_u16(&destination_ip[0..2]) ) +
                                       u64::from( BigEndian::read_u16(&destination_ip[2..4]) ) +
-                                      IpTrafficClass::Tcp as u64 +
+                                      u64::from( ip_number::TCP ) +
                                       tcp_length as u64,
                                       payload))
     }
 
     ///Calculates the upd header checksum based on a ipv6 header and returns the result. This does NOT set the checksum..
     pub fn calc_checksum_ipv6(&self, ip_header: &Ipv6Header, payload: &[u8]) -> Result<u16, ValueError> {
-        self.calc_checksum_ipv6_raw(&ip_header.source, &ip_header.destination, payload)
+        self.calc_checksum_ipv6_raw(ip_header.source, ip_header.destination, payload)
     }
 
     ///Calculates the checksum for the current header in ipv6 mode and returns the result. This does NOT set the checksum.
-    pub fn calc_checksum_ipv6_raw(&self, source: &[u8;16], destination: &[u8;16], payload: &[u8]) -> Result<u16, ValueError> {
+    pub fn calc_checksum_ipv6_raw(&self, source: [u8;16], destination: [u8;16], payload: &[u8]) -> Result<u16, ValueError> {
 
         //check that the total length fits into the field
         let tcp_length = (self._data_offset as usize)*4 + payload.len();
@@ -425,7 +424,7 @@ impl TcpHeader {
             return Err(ValueError::TcpLengthTooLarge(tcp_length));
         }
 
-        fn calc_sum(value: &[u8;16]) -> u64 {
+        fn calc_sum(value: [u8;16]) -> u64 {
             let mut result = 0;
             for i in 0..8 {
                 let index = i*2;
@@ -436,7 +435,7 @@ impl TcpHeader {
         Ok(self.calc_checksum_post_ip(
             calc_sum(source) +
             calc_sum(destination) +
-            IpTrafficClass::Tcp as u64 +
+            u64::from( ip_number::TCP ) +
             {
                 let mut buffer: [u8;4] = Default::default();
                 BigEndian::write_u32(&mut buffer[..], tcp_length as u32);
@@ -550,26 +549,27 @@ impl Default for TcpHeader {
 //      So the only option left to me was to write an implementation myself and deal with the added complexity
 //      and potential added error source.
 impl Debug for TcpHeader {
-    fn fmt(&self, fotmatter: &mut Formatter) -> Result<(), std::fmt::Error> {
-        // TODO add printing of decoded options
-        write!(fotmatter, "TcpHeader {{ source_port: {}, destination_port: {}, sequence_number: {}, acknowledgment_number: {}, data_offset: {}, ns: {}, fin: {}, syn: {}, rst: {}, psh: {}, ack: {}, urg: {}, ece: {}, cwr: {}, window_size: {}, checksum: {}, urgent_pointer: {} }}", 
-            self.source_port,
-            self.destination_port,
-            self.sequence_number,
-            self.acknowledgment_number,
-            self._data_offset,
-            self.ns,
-            self.fin,
-            self.syn,
-            self.rst,
-            self.psh,
-            self.ack,
-            self.urg,
-            self.ece,
-            self.cwr,
-            self.window_size,
-            self.checksum,
-            self.urgent_pointer)
+    fn fmt(&self, fmt: &mut Formatter) -> Result<(), std::fmt::Error> {
+        fmt.debug_struct("TcpHeader")
+            .field("source_port", &self.source_port)
+            .field("destination_port", &self.destination_port)
+            .field("sequence_number", &self.sequence_number)
+            .field("acknowledgment_number", &self.acknowledgment_number)
+            .field("data_offset", &self._data_offset)
+            .field("ns", &self.ns)
+            .field("fin", &self.fin)
+            .field("syn", &self.syn)
+            .field("rst", &self.rst)
+            .field("psh", &self.psh)
+            .field("ack", &self.ack)
+            .field("urg", &self.urg)
+            .field("ece", &self.ece)
+            .field("cwr", &self.cwr)
+            .field("window_size", &self.window_size)
+            .field("checksum", &self.checksum)
+            .field("urgent_pointer", &self.urgent_pointer)
+            .field("options", &self.options_iterator())
+            .finish()
     }
 }
 
@@ -592,7 +592,7 @@ impl std::cmp::PartialEq for TcpHeader {
         self.window_size == other.window_size &&
         self.checksum == other.checksum &&
         self.urgent_pointer  == other.urgent_pointer &&
-        self.options_buffer[..] == other.options_buffer[..]
+        self.options() == other.options()
     }
 }
 
@@ -784,11 +784,11 @@ impl<'a> TcpHeaderSlice<'a> {
 
     ///Calculates the upd header checksum based on a ipv4 header and returns the result. This does NOT set the checksum.
     pub fn calc_checksum_ipv4(&self, ip_header: &Ipv4HeaderSlice, payload: &[u8]) -> Result<u16, ValueError> {
-        self.calc_checksum_ipv4_raw(&ip_header.source(), &ip_header.destination(), payload)
+        self.calc_checksum_ipv4_raw(ip_header.source(), ip_header.destination(), payload)
     }
 
     ///Calculates the checksum for the current header in ipv4 mode and returns the result. This does NOT set the checksum.
-    pub fn calc_checksum_ipv4_raw(&self, source_ip: &[u8], destination_ip: &[u8], payload: &[u8]) -> Result<u16, ValueError> {
+    pub fn calc_checksum_ipv4_raw(&self, source_ip: [u8;4], destination_ip: [u8;4], payload: &[u8]) -> Result<u16, ValueError> {
         
         //check that the total length fits into the field
         let tcp_length = self.slice.len() + payload.len();
@@ -801,18 +801,18 @@ impl<'a> TcpHeaderSlice<'a> {
                                       u64::from( BigEndian::read_u16(&source_ip[2..4]) ) +
                                       u64::from( BigEndian::read_u16(&destination_ip[0..2]) ) +
                                       u64::from( BigEndian::read_u16(&destination_ip[2..4]) ) +
-                                      IpTrafficClass::Tcp as u64 +
+                                      u64::from( ip_number::TCP ) +
                                       tcp_length as u64,
                                       payload))
     }
 
     ///Calculates the upd header checksum based on a ipv6 header and returns the result. This does NOT set the checksum..
     pub fn calc_checksum_ipv6(&self, ip_header: &Ipv6HeaderSlice, payload: &[u8]) -> Result<u16, ValueError> {
-        self.calc_checksum_ipv6_raw(&ip_header.source(), &ip_header.destination(), payload)
+        self.calc_checksum_ipv6_raw(ip_header.source(), ip_header.destination(), payload)
     }
 
     ///Calculates the checksum for the current header in ipv6 mode and returns the result. This does NOT set the checksum.
-    pub fn calc_checksum_ipv6_raw(&self, source: &[u8], destination: &[u8], payload: &[u8]) -> Result<u16, ValueError> {
+    pub fn calc_checksum_ipv6_raw(&self, source: [u8;16], destination: [u8;16], payload: &[u8]) -> Result<u16, ValueError> {
 
         //check that the total length fits into the field
         let tcp_length = (self.data_offset() as usize)*4 + payload.len();
@@ -820,7 +820,7 @@ impl<'a> TcpHeaderSlice<'a> {
             return Err(ValueError::TcpLengthTooLarge(tcp_length));
         }
 
-        fn calc_addr_sum(value: &[u8]) -> u64 {
+        fn calc_addr_sum(value: [u8;16]) -> u64 {
             let mut result = 0;
             for i in 0..8 {
                 let index = i*2;
@@ -831,7 +831,7 @@ impl<'a> TcpHeaderSlice<'a> {
         Ok(self.calc_checksum_post_ip(
             calc_addr_sum(source) +
             calc_addr_sum(destination) +
-            IpTrafficClass::Tcp as u64 +
+            u64::from( ip_number::TCP ) +
             {
                 let mut buffer: [u8;4] = Default::default();
                 BigEndian::write_u32(&mut buffer[..], tcp_length as u32);
@@ -871,10 +871,28 @@ impl<'a> TcpHeaderSlice<'a> {
     }
 }
 
-///Different kinds of options that can be present in the options part of a tcp header.
+/// Different kinds of options that can be present in the options part of a tcp header.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TcpOptionElement {
-    Nop,
+    /// "No-Operation" option.
+    ///
+    /// Description from RFC 793:
+    ///
+    /// This option code may be used between options, for example, to
+    /// align the beginning of a subsequent option on a word boundary.
+    /// There is no guarantee that senders will use this option, so
+    /// receivers must be prepared to process options even if they do
+    /// not begin on a word boundary.
+    Noop,
+    /// "Maximum Segment Size" option.
+    ///
+    /// Description from RFC 793:
+    ///
+    /// If this option is present, then it communicates the maximum
+    /// receive segment size at the TCP which sends this segment.
+    /// This field must only be sent in the initial connection request
+    /// (i.e., in segments with the SYN control bit set).  If this
+    //// option is not used, any segment size is allowed.
     MaximumSegmentSize(u16),
     WindowScale(u8),
     SelectiveAcknowledgementPermitted,
@@ -910,17 +928,89 @@ pub enum TcpOptionWriteError {
 }
 
 ///Allows iterating over the options after a TCP header.
+#[derive(Clone, Eq, PartialEq)]
 pub struct TcpOptionsIterator<'a> {
     options: &'a [u8]
 }
 
+#[deprecated(
+    since = "0.10.0",
+    note = "Please use tcp_option::KIND_END instead"
+)]
+/// Deprecated please use [tcp_option::KIND_END] instead.
 pub const TCP_OPTION_ID_END: u8 = 0;
+
+#[deprecated(
+    since = "0.10.0",
+    note = "Please use tcp_option::KIND_NOOP instead"
+)]
+/// Deprecated please use [tcp_option::KIND_NOOP] instead.
 pub const TCP_OPTION_ID_NOP: u8 = 1;
+
+#[deprecated(
+    since = "0.10.0",
+    note = "Please use tcp_option::KIND_MAXIMUM_SEGMENT_SIZE instead"
+)]
+/// Deprecated please use [tcp_option::KIND_MAXIMUM_SEGMENT_SIZE] instead.
 pub const TCP_OPTION_ID_MAXIMUM_SEGMENT_SIZE: u8 = 2;
+
+#[deprecated(
+    since = "0.10.0",
+    note = "Please use tcp_option::KIND_WINDOW_SCALE instead"
+)]
+/// Deprecated please use [tcp_option::KIND_WINDOW_SCALE] instead.
 pub const TCP_OPTION_ID_WINDOW_SCALE: u8 = 3;
+
+#[deprecated(
+    since = "0.10.0",
+    note = "Please use tcp_option::KIND_SELECTIVE_ACK_PERMITTED instead"
+)]
+/// Deprecated please use [tcp_option::KIND_SELECTIVE_ACK_PERMITTED] instead.
 pub const TCP_OPTION_ID_SELECTIVE_ACK_PERMITTED: u8 = 4;
+
+#[deprecated(
+    since = "0.10.0",
+    note = "Please use tcp_option::KIND_SELECTIVE_ACK instead"
+)]
+/// Deprecated please use [tcp_option::KIND_SELECTIVE_ACK] instead.
 pub const TCP_OPTION_ID_SELECTIVE_ACK: u8 = 5;
+
+#[deprecated(
+    since = "0.10.0",
+    note = "Please use tcp_option::KIND_TIMESTAMP instead"
+)]
+/// Deprecated please use [tcp_option::KIND_TIMESTAMP] instead.
 pub const TCP_OPTION_ID_TIMESTAMP: u8 = 8;
+
+/// Module containing the constants for tcp options (id number & sizes).
+pub mod tcp_option {
+    /// `u8` identifying the "end of options list" in the tcp option.
+    pub const KIND_END: u8 = 0;
+    /// `u8` identifying a "no operation" tcp option.
+    pub const KIND_NOOP: u8 = 1;
+    /// `u8` identifying a "maximum segment size" tcp option.
+    pub const KIND_MAXIMUM_SEGMENT_SIZE: u8 = 2;
+    /// `u8` identifying a "window scaling" tcp option.
+    pub const KIND_WINDOW_SCALE: u8 = 3;
+    /// `u8` identifying a "selective acknowledgement permitted" tcp option.
+    pub const KIND_SELECTIVE_ACK_PERMITTED: u8 = 4;
+    /// `u8` identifying a "selective acknowledgement" tcp option.
+    pub const KIND_SELECTIVE_ACK: u8 = 5;
+    /// `u8` identifying a "timestamp and echo of previous timestamp" tcp option.
+    pub const KIND_TIMESTAMP: u8 = 8;
+    /// Length in octets/bytes of the "end" tcp option (includes kind value).
+    pub const LEN_END: u8 = 1;
+    /// Length in octets/bytes of the "no operation" tcp option (includes kind value).
+    pub const LEN_NOOP: u8 = 1;
+    /// Length in octets/bytes of the "maximum segment size" tcp option (includes kind value).
+    pub const LEN_MAXIMUM_SEGMENT_SIZE: u8 = 4;
+    /// Length in octets/bytes of the "window scaling" tcp option (includes kind value).
+    pub const LEN_WINDOW_SCALE: u8 = 3;
+    /// Length in octets/bytes of the "selective acknowledgement permitted" tcp option (includes kind value).
+    pub const LEN_SELECTIVE_ACK_PERMITTED: u8 = 2;
+    /// Length in octets/bytes of the "timestamp and echo of previous timestamp" tcp option (includes kind value).
+    pub const LEN_TIMESTAMP: u8 = 10;
+}
 
 impl<'a> TcpOptionsIterator<'a> {
     ///Creates an options iterator from a slice containing encoded tcp options.
@@ -960,17 +1050,18 @@ impl<'a> Iterator for TcpOptionsIterator<'a> {
             None
         } else {
             //first determine the result
+            use tcp_option::*;
             let result = match self.options[0] {
                 //end
-                TCP_OPTION_ID_END => {
+                KIND_END => {
                     None
                 },
-                TCP_OPTION_ID_NOP => {
+                KIND_NOOP => {
                     self.options = &self.options[1..];
-                    Some(Ok(Nop))
+                    Some(Ok(Noop))
                 },
-                TCP_OPTION_ID_MAXIMUM_SEGMENT_SIZE => {
-                    match expect_specific_size(4, self.options) {
+                KIND_MAXIMUM_SEGMENT_SIZE => {
+                    match expect_specific_size(LEN_MAXIMUM_SEGMENT_SIZE, self.options) {
                         Err(value) => {
                             Some(Err(value))
                         },
@@ -981,8 +1072,8 @@ impl<'a> Iterator for TcpOptionsIterator<'a> {
                         }
                     }
                 },
-                TCP_OPTION_ID_WINDOW_SCALE => {
-                    match expect_specific_size(3, self.options) {
+                KIND_WINDOW_SCALE => {
+                    match expect_specific_size(LEN_WINDOW_SCALE, self.options) {
                         Err(value) => Some(Err(value)),
                         _ => {
                             let value = self.options[2];
@@ -991,8 +1082,8 @@ impl<'a> Iterator for TcpOptionsIterator<'a> {
                         }
                     }
                 },
-                TCP_OPTION_ID_SELECTIVE_ACK_PERMITTED => {
-                    match expect_specific_size(2, self.options) {
+                KIND_SELECTIVE_ACK_PERMITTED => {
+                    match expect_specific_size(LEN_SELECTIVE_ACK_PERMITTED, self.options) {
                         Err(value) => Some(Err(value)),
                         _ => {
                             self.options = &self.options[2..];
@@ -1000,7 +1091,7 @@ impl<'a> Iterator for TcpOptionsIterator<'a> {
                         }
                     }
                 },
-                TCP_OPTION_ID_SELECTIVE_ACK => {
+                KIND_SELECTIVE_ACK => {
                     //check that the length field can be read
                     if self.options.len() < 2 {
                         Some(Err(UnexpectedEndOfSlice(self.options[0])))
@@ -1036,8 +1127,8 @@ impl<'a> Iterator for TcpOptionsIterator<'a> {
                         }
                     }
                 },
-                TCP_OPTION_ID_TIMESTAMP => {
-                    match expect_specific_size(10, self.options) {
+                KIND_TIMESTAMP => {
+                    match expect_specific_size(LEN_TIMESTAMP, self.options) {
                         Err(value) => Some(Err(value)),
                         _ => {
                             let t = Timestamp(
@@ -1068,5 +1159,24 @@ impl<'a> Iterator for TcpOptionsIterator<'a> {
             //finally return the result
             result
         }
+    }
+}
+
+impl<'a> Debug for TcpOptionsIterator<'a> {
+    fn fmt(&self, fmt: &mut Formatter) -> Result<(), std::fmt::Error> {
+        let mut list = fmt.debug_list();
+
+        // create a copy and iterate over all elements
+        let mut clone = self.clone();
+        while let Some(it) = clone.next() {
+            match it {
+                Ok(e) => { list.entry(&e); },
+                Err(e) => {
+                    list.entry(&Result::<(), TcpOptionReadError>::Err(e.clone()));
+                }
+            }
+        }
+
+        list.finish()
     }
 }

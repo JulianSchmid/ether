@@ -116,7 +116,7 @@
 //! * [`DoubleVlanHeaderSlice.from_slice`](struct.DoubleVlanHeaderSlice.html#method.from_slice)
 //! * [`Ipv4HeaderSlice.from_slice`](struct.Ipv4HeaderSlice.html#method.from_slice)
 //! * [`Ipv6HeaderSlice.from_slice`](struct.Ipv6HeaderSlice.html#method.from_slice)
-//! * [`Ipv6ExtensionHeaderSlice.from_slice`](struct.Ipv6ExtensionHeaderSlice.html)
+//! * [`Ipv6ExtensionHeader.from_slice`](struct.Ipv6ExtensionHeader.html)
 //! * [`UdpHeaderSlice.from_slice`](struct.UdpHeaderSlice.html#method.from_slice)
 //! * [`TcpHeaderSlice.from_slice`](struct.TcpHeaderSlice.html#method.from_slice)
 //! 
@@ -197,6 +197,7 @@
 //! * TCP Extensions for High Performance [RFC 7323](https://tools.ietf.org/html/rfc7323)
 //! * The Addition of Explicit Congestion Notification (ECN) to IP [RFC 3168](https://tools.ietf.org/html/rfc3168)
 //! * Robust Explicit Congestion Notification (ECN) Signaling with Nonces [RFC 3540](https://tools.ietf.org/html/rfc3540)
+//! * IP Authentication Header [RFC 4302](https://tools.ietf.org/html/rfc4302)
 
 use std::io;
 use std::fmt;
@@ -208,8 +209,13 @@ pub use crate::link::vlan_tagging::*;
 
 mod internet;
 pub use crate::internet::ip::*;
+pub use crate::internet::ip_authentication::*;
 pub use crate::internet::ipv4::*;
+pub use crate::internet::ipv4_extensions::*;
 pub use crate::internet::ipv6::*;
+pub use crate::internet::ipv6_extensions::*;
+pub use crate::internet::ipv6_generic_extension::*;
+pub use crate::internet::ipv6_fragment::*;
 
 mod transport;
 pub use crate::transport::tcp::*;
@@ -225,6 +231,10 @@ pub use crate::packet_decoder::*;
 mod packet_slicing;
 pub use crate::packet_slicing::*;
 
+#[deprecated(
+    since = "0.10.0",
+    note = "The module packet_filter will be removed."
+)]
 pub mod packet_filter;
 
 ///Contains the size when serialized.
@@ -235,11 +245,13 @@ pub trait SerializedSize {
 ///Errors that can occur when reading.
 #[derive(Debug)]
 pub enum ReadError {
+    ///Whenever an std::io::Error gets triggerd during a write it gets forwarded via this enum value.
     IoError(std::io::Error),
     ///Error when an unexpected end of a slice was reached even though more data was expected to be present (expected minimum size as argument).
     UnexpectedEndOfSlice(usize),
-    ///Error when a double vlan tag was expected but the tpid of the outer vlan does not contain the expected id of 0x8100.
-    VlanDoubleTaggingUnexpectedOuterTpid(u16),
+    ///Error when a double vlan tag was expected but the ether type of the the first vlan header does not an vlan header ether type.
+    ///The value is the unexpected ether type value in the outer vlan header.
+    DoubleVlanOuterNonVlanEtherType(u16),
     ///Error when the ip header version is not supported (only 4 & 6 are supported). The value is the version that was received.
     IpUnsupportedVersion(u8),
     ///Error when the ip header version field is not equal 4. The value is the version that was received.
@@ -252,6 +264,10 @@ pub enum ReadError {
     Ipv6UnexpectedVersion(u8),
     ///Error when more then 7 header extensions are present (according to RFC82000 this should never happen).
     Ipv6TooManyHeaderExtensions,
+    ///Error if the ipv6 hop by hop header does not occur directly after the ipv6 header (see rfc8200 chapter 4.1.)
+    Ipv6HopByHopHeaderNotAtStart,
+    ///Error if the header length in the ip authentication header is smaller then the minimum size of 1.
+    IpAuthenticationHeaderTooSmallPayloadLength(u8),
     ///Error given if the data_offset field in a TCP header is smaller then the minimum size of the tcp header itself.
     TcpDataOffsetTooSmall(u8),
 }
@@ -265,8 +281,23 @@ impl ReadError {
             value => value
         }
     }
-}
 
+    /// Returns the `std::io::Error` value if the `ReadError` is an `IoError`.
+    /// Otherwise `None is returned.
+    pub fn io_error(self) -> Option<std::io::Error> {
+        match self {
+            ReadError::IoError(value) => Some(value),
+            _ => None
+        }
+    }
+    /// Returns the expected minimum size if the error is an `UnexpectedEndOfSlice`.
+    pub fn unexpected_end_of_slice_min_expected_size(self) -> Option<usize> {
+        match self {
+            ReadError::UnexpectedEndOfSlice(value) => Some(value),
+            _ => None
+        }
+    }
+}
 
 impl fmt::Display for ReadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -277,8 +308,8 @@ impl fmt::Display for ReadError {
             UnexpectedEndOfSlice(expected_minimum_size) => { // usize
                 write!(f, "ReadError: Unexpected end of slice. The given slice contained less then minimum required {} bytes.", expected_minimum_size)
             },
-            VlanDoubleTaggingUnexpectedOuterTpid(tpid) => { //u16
-                write!(f, "ReadError: Expected a double vlan header, but the outer tpid {} is a non vlan header tpid.", tpid)
+            DoubleVlanOuterNonVlanEtherType(ether_type) => { //u16
+                write!(f, "ReadError: Expected a double vlan header, but the ether type field value {} of the outer vlan header is a non vlan header ether type.", ether_type)
             },
             IpUnsupportedVersion(version_number) => { // u8
                 write!(f, "ReadError: Unsupported IP version number. The IP header contained the unsupported version number {}.", version_number)
@@ -297,6 +328,12 @@ impl fmt::Display for ReadError {
             },
             Ipv6TooManyHeaderExtensions => {
                 write!(f, "ReadError: Too many IPv6 header extensions. There are more then 7 extension headers present, this not supported.")
+            },
+            Ipv6HopByHopHeaderNotAtStart => {
+                write!(f, "ReadError: Encountered an IPv6 hop-by-hop header somwhere else then directly after the IPv6 header. This is not allowed according to RFC 8200.")
+            },
+            IpAuthenticationHeaderTooSmallPayloadLength(length) => {
+                write!(f, "ReadError: Authentication header payload size is smaller then 1 ({}) which is smaller then the minimum size of the header.", length)
             },
             TcpDataOffsetTooSmall(data_offset) => { //u8
                 write!(f, "ReadError: TCP data offset too small. The data offset value {} in the tcp header is smaller then the tcp header itself.", data_offset)
@@ -331,8 +368,17 @@ pub enum WriteError {
 }
 
 impl WriteError {
+    /// Returns the `std::io::Error` value if the `WriteError` is an `IoError`.
+    /// Otherwise `None is returned.
+    pub fn io_error(self) -> Option<std::io::Error> {
+        match self {
+            WriteError::IoError(value) => Some(value),
+            _ => None
+        }
+    }
+    /// Returns the `std::io::Error` value if the `WriteError` is an `ValueError`.
+    /// Otherwise `None` is returned.
     pub fn value_error(self) -> Option<ValueError> {
-
         match self {
             WriteError::ValueError(value) => Some(value),
             _ => None
@@ -387,6 +433,22 @@ pub enum ValueError {
     Ipv4PayloadLengthTooLarge(usize),
     ///Error when a given payload & ipv6 header block is bigger then what fits inside an ipv6 payload_length field.
     Ipv6PayloadLengthTooLarge(usize),
+    ///Error when a given payload size is smaller then 6 octets which is the minimum ipv6 extended header size (`Ipv6GenericExtensionHeader::MAX_PAYLOAD_LEN`).
+    Ipv6ExtensionPayloadTooSmall(usize),
+    ///Error when a given payload size is bigger then what fits inside an ipv6 extended header size (`Ipv6GenericExtensionHeader::MAX_PAYLOAD_LEN`).
+    Ipv6ExtensionPayloadTooLarge(usize),
+    ///Error when a given payload length is not aligned to be a multiple of 8 octets when 6 is substracted and can not be represented by the header length field.
+    Ipv6ExtensionPayloadLengthUnaligned(usize),
+    ///Error when a given authentication header icv size is not a multiple of 4 bytes or bigger then 1016 bytes and therefor can not be represented in the header length field.
+    IpAuthenticationHeaderBadIcvLength(usize),
+    ///Error when a header in `Ipv4Extensions` is never written as it is never referenced by any of the other `next_header` fields or the initial `protocol`.
+    Ipv4ExtensionNotReferenced(IpNumber),
+    ///Error when a hop-by-hop header is not referenced as the first header after the ipv6 header but as a later extension header.
+    Ipv6ExtensionHopByHopNotAtStart,
+    ///Error when a header in `Ipv6Extensions` is never written as it is never referenced by any of the other `next_header` fields or the initial ip number.
+    Ipv6ExtensionNotReferenced(IpNumber),
+    ///Error when a header in `Ipv6Extensions` is referenced multiple times or is referenced and not defined.
+    Ipv6ExtensionNotDefinedReference(IpNumber),
     ///Error when a given payload is bigger then what fits inside an udp packet
     ///Note that a the maximum payload size, as far as udp is conceirned, is max_value(u16) - 8. The 8 is for the size of the udp header itself.
     UdpPayloadLengthTooLarge(usize),
@@ -418,6 +480,30 @@ impl fmt::Display for ValueError {
             Ipv6PayloadLengthTooLarge(size) => { //usize
                 write!(f, "IPv6 'payload_length' too large. The IPv6 header block & payload size ({} bytes) is larger then what can be be represented by the 'payload_length' field in the IPv6 header.", size)
             },
+            Ipv6ExtensionPayloadTooSmall(size) => {
+                write!(f, "IPv6 extensions header payload length is too small. The payload size ({} bytes) is less then 6 octets which is the minimum IPv6 extension header payload size.", size)
+            },
+            Ipv6ExtensionPayloadTooLarge(size) => {
+                write!(f, "IPv6 extensions header payload length is too large. The payload size ({} bytes) is larger then what can be be represented by the 'extended header size' field in an IPv6 extension header.", size)
+            },
+            Ipv6ExtensionPayloadLengthUnaligned(size) => {
+                write!(f, "IPv6 extensions header 'payload length ({} bytes) + 2' is not multiple of 8 (+ 2 for the `next_header` and `header_length` fields). This is required as the header length field can only express lengths in multiple of 8 bytes.", size)
+            },
+            IpAuthenticationHeaderBadIcvLength(size) => {
+                write!(f, "IP authentication header 'raw_icv' value has a length ({} bytes) is either not a multiple of 4 bytes or bigger then the maximum of 1016 bytes.", size)
+            },
+            Ipv4ExtensionNotReferenced(ip_protocol_number) => {
+                write!(f, "IPv4 extensions '{:?}' is defined but is not referenced by any of the 'next_header' of the other extension headers or the 'protocol' field of the IPv4 header.", ip_protocol_number)
+            }
+            Ipv6ExtensionHopByHopNotAtStart => {
+                write!(f, "IPv6 extensions hop-by-hop is not located directly after the IPv6 header (required by IPv6).")
+            },
+            Ipv6ExtensionNotReferenced(ip_protocol_number) => {
+                write!(f, "IPv6 extensions '{:?}' is defined but is not referenced by any of the 'next_header' of the other extension headers or the IPv6 header.", ip_protocol_number)
+            },
+            Ipv6ExtensionNotDefinedReference(ip_protocol_number) => {
+                write!(f, "IPv6 extensions '{:?}' is referenced by the 'next_header' field of an extension headers or the IPv6 header but is not defined in the 'Ipv6Extensions'.", ip_protocol_number)
+            },
             UdpPayloadLengthTooLarge(length) => { //usize
                 write!(f, "UDP 'length' too large. The UDP length ({} bytes) is larger then what can be be represented by the 'length' field in the UDP header.", length)
             }, 
@@ -445,6 +531,8 @@ pub enum ErrorField {
     Ipv4Ecn,
     Ipv4FragmentsOffset,
     Ipv6FlowLabel,
+    /// Ipv6 fragment header fragment offset field.
+    Ipv6FragmentOffset,
     ///VlanTaggingHeader.priority_code_point
     VlanTagPriorityCodePoint,
     ///VlanTaggingHeader.vlan_identifier
@@ -460,6 +548,7 @@ impl fmt::Display for ErrorField {
             Ipv4Ecn => write!(f, "Ipv4Header.explicit_congestion_notification"),
             Ipv4FragmentsOffset => write!(f, "Ipv4Header.fragments_offset"),
             Ipv6FlowLabel => write!(f, "Ipv6Header.flow_label"),
+            Ipv6FragmentOffset => write!(f, "Ipv6FragmentHeader.fragment_offset"),
             VlanTagPriorityCodePoint => write!(f, "SingleVlanHeader.priority_code_point"),
             VlanTagVlanId => write!(f, "SingleVlanHeader.vlan_identifier")
         }

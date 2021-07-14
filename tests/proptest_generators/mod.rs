@@ -100,6 +100,16 @@ prop_compose! {
 }
 
 prop_compose! {
+    pub(crate) fn vlan_single_any()
+        (ether_type in any::<u16>())
+        (result in vlan_single_with(ether_type)) 
+        -> SingleVlanHeader
+    {
+        result
+    }
+}
+
+prop_compose! {
     pub(crate) fn ipv4_with(protocol: u8)
     (
         ihl in 0u8..10,
@@ -167,8 +177,8 @@ prop_compose! {
 }
 
 static IPV4_KNOWN_PROTOCOLS: &'static [u8] = &[
-    IpTrafficClass::Udp as u8,
-    IpTrafficClass::Tcp as u8
+    ip_number::UDP,
+    ip_number::TCP
 ];
 
 prop_compose! {
@@ -218,19 +228,20 @@ prop_compose! {
 }
 
 static IPV6_KNOWN_NEXT_HEADERS: &'static [u8] = &[
-    IpTrafficClass::Udp as u8,
-    IpTrafficClass::Tcp as u8,
-    IpTrafficClass::IPv6HeaderHopByHop as u8,
-    IpTrafficClass::IPv6RouteHeader as u8,
-    IpTrafficClass::IPv6FragmentationHeader as u8,
-    IpTrafficClass::IPv6EncapSecurityPayload as u8,
-    IpTrafficClass::IPv6AuthenticationHeader as u8,
-    IpTrafficClass::IPv6DestinationOptions as u8,
-    IpTrafficClass::MobilityHeader as u8,
-    IpTrafficClass::Hip as u8,
-    IpTrafficClass::Shim6 as u8,
-    IpTrafficClass::ExperimentalAndTesting0 as u8,
-    IpTrafficClass::ExperimentalAndTesting1 as u8
+    ip_number::UDP,
+    ip_number::TCP,
+    ip_number::IPV6_HOP_BY_HOP,
+    ip_number::IPV6_ROUTE,
+    ip_number::IPV6_FRAG,
+    ip_number::AUTH,
+    ip_number::IPV6_DEST_OPTIONS,
+    ip_number::MOBILITY,
+    ip_number::HIP,
+    ip_number::SHIM6,
+    // currently not supported:
+    // - EncapsulatingSecurityPayload
+    // - ExperimentalAndTesting0
+    // - ExperimentalAndTesting1
 ];
 
 prop_compose! {
@@ -258,6 +269,97 @@ prop_compose! {
 }
 
 prop_compose! {
+    pub(crate) fn ipv6_generic_extension_with(
+        next_header: u8,
+        len: u8
+    ) (
+        next_header in proptest::strategy::Just(next_header),
+        payload in proptest::collection::vec(any::<u8>(), (len as usize)*8 + 6)
+    ) -> Ipv6GenericExtensionHeader
+    {
+        Ipv6GenericExtensionHeader::new_raw(
+            next_header,
+            &payload[..]
+        ).unwrap()
+    }
+}
+
+prop_compose! {
+    pub(crate) fn ipv6_generic_extension_any() 
+        (
+            next_header in any::<u8>(),
+            len in any::<u8>()
+        ) (
+            result in ipv6_generic_extension_with(next_header, len)
+    ) -> Ipv6GenericExtensionHeader
+    {
+        result
+    }
+}
+
+/*
+/// Contains everything to construct the supported ip extension headers
+pub enum IpExtensionComponent {
+    Ipv6HeaderHopByHop(Ipv6GenericExtensionHeader),
+    Ipv6Route(Ipv6GenericExtensionHeader),
+    Ipv6DestinationOptions(Ipv6GenericExtensionHeader),
+
+    MobilityHeader(Ipv6GenericExtensionHeader),
+    Hip(Ipv6GenericExtensionHeader),
+    Shim6(Ipv6GenericExtensionHeader),
+
+    AuthenticationHeader(IpAuthenticationHeader),
+    Ipv6Fragment(Ipv6FragmentHeader),
+}
+
+impl IpExtensionComponent {
+    pub fn traffic_class(&self) -> u8 {
+        match self {
+            Ipv6HeaderHopByHop(_) => IpTrafficClass::IPv6HeaderHopByHop as u8,
+            Ipv6Route(_) => IpTrafficClass::IPv6RouteHeader as u8,
+            Ipv6DestinationOptions(_) => IpTrafficClass::IPv6DestinationOptions as u8,
+
+            MobilityHeader(_) => IpTrafficClass::MobilityHeader as u8,
+            Hip(_) => IpTrafficClass::Hip as u8,
+            Shim6(_) => IpTrafficClass::Shim6 as u8,
+
+            AuthenticationHeader(_) => IpTrafficClass::AuthenticationHeader as u8,
+            Ipv6Fragment(_) => IpTrafficClass::IPv6FragmentationHeader as u8,
+        }
+    }
+}
+
+prop_compose! {
+    pub(crate) fn ip_extension_component(
+        next_header: u8,
+        len: u8
+    ) (
+        component_type in 0..8usize,
+        next_header in proptest::strategy::Just(next_header),
+        len in proptest::strategy::Just(len),
+        ext in ipv6_extension_with(next_header, len),
+        frag in ipv6_fragment_with(next_header),
+        auth in ipv6_fragment_with(next_header)
+    ) {
+        use IpExtensionComponent::*;
+        match component_type {
+            0 => Ipv6HeaderHopByHop(ext),
+            1 => Ipv6Route(ext),
+            2 => Ipv6DestinationOptions(ext),
+
+            3 => MobilityHeader(ext),
+            4 => Hip(ext),
+            5 => Shim6(ext),
+
+            6 => AuthenticationHeader(auth),
+            7 => Ipv6Fragment(frag),
+
+            _ => panic!("unsupported ip_extension_component");
+        }
+    }
+}
+
+prop_compose! {
     pub(crate) fn ipv6_extension_with(
         next_header: u8,
         len: u8
@@ -265,13 +367,12 @@ prop_compose! {
         next_header in proptest::strategy::Just(next_header),
         len in proptest::strategy::Just(len),
         payload in proptest::collection::vec(any::<u8>(), (len as usize)*8 + 8)
-    ) -> Vec<u8>
+    ) -> Ipv6ExtensionComponents
     {
-        let mut result = payload.clone();
-        //insert next header & length
-        result[0] = next_header;
-        result[1] = len;
-        result
+        Ipv6ExtensionComponents {
+            next_header,
+            data: payload.clone()
+        }
     }
 }
 //Order of ipv6 heder extensions defined by ipv6 rfc
@@ -289,8 +390,8 @@ static IPV6_EXTENSION_HEADER_ORDER: &'static [u8] = &[
     IpTrafficClass::IPv6DestinationOptions as u8,
     IpTrafficClass::IPv6RouteHeader as u8,
     IpTrafficClass::IPv6FragmentationHeader as u8,
-    IpTrafficClass::IPv6AuthenticationHeader as u8,
-    IpTrafficClass::IPv6EncapSecurityPayload as u8,
+    IpTrafficClass::AuthenticationHeader as u8,
+    IpTrafficClass::EncapsulatingSecurityPayload as u8,
     IpTrafficClass::IPv6DestinationOptions as u8,
     IpTrafficClass::MobilityHeader as u8,
     IpTrafficClass::Hip as u8,
@@ -332,7 +433,7 @@ prop_compose! {
         hdr10 in ipv6_extension_with(IpTrafficClass::ExperimentalAndTesting1 as u8, len10),
         hdr11 in ipv6_extension_with(last_next_header, len11),
         order in proptest::sample::subsequence((0..IPV6_EXTENSION_HEADER_ORDER.len()).collect::<Vec<usize>>(), 1..IPV6_EXTENSION_HEADER_ORDER.len())
-    ) -> Vec<(u8, Vec<u8>)>
+    ) -> Vec<Ipv6ExtensionComponents>
     {
         let all_headers = vec![hdr0, hdr1, hdr2, hdr3, hdr4, 
                                hdr5, hdr6, hdr7, hdr8, hdr9, 
@@ -356,6 +457,66 @@ prop_compose! {
         }
 
         result
+    }
+}
+*/
+prop_compose! {
+    pub(crate) fn ipv6_fragment_with(
+        next_header: u8
+    ) (
+        next_header in proptest::strategy::Just(next_header),
+        fragment_offset in 0u16..=0b0001_1111_1111_1111u16,
+        more_fragments in any::<bool>(),
+        identification in any::<u32>(),
+    ) -> Ipv6FragmentHeader
+    {
+        Ipv6FragmentHeader::new(
+            next_header,
+            fragment_offset,
+            more_fragments,
+            identification
+        )
+    }
+}
+
+prop_compose! {
+    pub(crate) fn ipv6_fragment_any()
+        (next_header in any::<u8>())
+        (result in ipv6_fragment_with(next_header)
+    ) -> Ipv6FragmentHeader
+    {
+        result
+    }
+}
+
+prop_compose! {
+    pub(crate) fn ip_authentication_with(
+        next_header: u8
+    ) (
+        next_header in proptest::strategy::Just(next_header),
+        len in 1..0xffu8
+    ) (
+        next_header in proptest::strategy::Just(next_header),
+        spi in any::<u32>(),
+        sequence_number in any::<u32>(),
+        icv in proptest::collection::vec(any::<u8>(), (len as usize)*4)
+    ) -> IpAuthenticationHeader {
+        IpAuthenticationHeader::new(
+            next_header,
+            spi,
+            sequence_number,
+            &icv
+        ).unwrap()
+    }
+}
+
+prop_compose! {
+    pub(crate) fn ip_authentication_any() (
+        next_header in any::<u8>()
+    ) (
+        header in ip_authentication_with(next_header)
+    ) -> IpAuthenticationHeader {
+        header
     }
 }
 
@@ -415,4 +576,154 @@ prop_compose! {
         result.set_options_raw(&options[..]).unwrap();
         result
     }
+}
+
+pub fn ip_number_any() -> impl Strategy<Value = IpNumber> {
+    use IpNumber::*;
+    prop_oneof![
+        Just(IPv6HeaderHopByHop),
+        Just(Icmp),
+        Just(Igmp),
+        Just(Ggp),
+        Just(IPv4),
+        Just(Stream),
+        Just(Tcp),
+        Just(Cbt),
+        Just(Egp),
+        Just(Igp),
+        Just(BbnRccMon),
+        Just(NvpII),
+        Just(Pup),
+        Just(Argus),
+        Just(Emcon),
+        Just(Xnet),
+        Just(Chaos),
+        Just(Udp),
+        Just(Mux),
+        Just(DcnMeas),
+        Just(Hmp),
+        Just(Prm),
+        Just(XnsIdp),
+        Just(Trunk1),
+        Just(Trunk2),
+        Just(Leaf1),
+        Just(Leaf2),
+        Just(Rdp),
+        Just(Irtp),
+        Just(IsoTp4),
+        Just(NetBlt),
+        Just(MfeNsp),
+        Just(MeritInp),
+        Just(Dccp),
+        Just(ThirdPartyConnectProtocol),
+        Just(Idpr),
+        Just(Xtp),
+        Just(Ddp),
+        Just(IdprCmtp),
+        Just(TpPlusPlus),
+        Just(Il),
+        Just(Ipv6),
+        Just(Sdrp),
+        Just(IPv6RouteHeader),
+        Just(IPv6FragmentationHeader),
+        Just(Idrp),
+        Just(Rsvp),
+        Just(Gre),
+        Just(Dsr),
+        Just(Bna),
+        Just(EncapsulatingSecurityPayload),
+        Just(AuthenticationHeader),
+        Just(Inlsp),
+        Just(Swipe),
+        Just(Narp),
+        Just(Mobile),
+        Just(Tlsp),
+        Just(Skip),
+        Just(IPv6Icmp),
+        Just(IPv6NoNextHeader),
+        Just(IPv6DestinationOptions),
+        Just(AnyHostInternalProtocol),
+        Just(Cftp),
+        Just(AnyLocalNetwork),
+        Just(SatExpak),
+        Just(Krytolan),
+        Just(Rvd),
+        Just(Ippc),
+        Just(AnyDistributedFileSystem),
+        Just(SatMon),
+        Just(Visa),
+        Just(Ipcv),
+        Just(Cpnx),
+        Just(Cphb),
+        Just(Wsn),
+        Just(Pvp),
+        Just(BrSatMon),
+        Just(SunNd),
+        Just(WbMon),
+        Just(WbExpak),
+        Just(IsoIp),
+        Just(Vmtp),
+        Just(SecureVmtp),
+        Just(Vines),
+        Just(TtpOrIptm),
+        Just(NsfnetIgp),
+        Just(Dgp),
+        Just(Tcf),
+        Just(Eigrp),
+        Just(Ospfigp),
+        Just(SpriteRpc),
+        Just(Larp),
+        Just(Mtp),
+        Just(Ax25),
+        Just(Ipip),
+        Just(Micp),
+        Just(SccSp),
+        Just(EtherIp),
+        Just(Encap),
+        Just(Gmtp),
+        Just(Ifmp),
+        Just(Pnni),
+        Just(Pim),
+        Just(Aris),
+        Just(Scps),
+        Just(Qnx),
+        Just(ActiveNetworks),
+        Just(IpComp),
+        Just(SitraNetworksProtocol),
+        Just(CompaqPeer),
+        Just(IpxInIp),
+        Just(Vrrp),
+        Just(Pgm),
+        Just(AnyZeroHopProtocol),
+        Just(Layer2TunnelingProtocol),
+        Just(Ddx),
+        Just(Iatp),
+        Just(Stp),
+        Just(Srp),
+        Just(Uti),
+        Just(SimpleMessageProtocol),
+        Just(Sm),
+        Just(Ptp),
+        Just(IsisOverIpv4),
+        Just(Fire),
+        Just(Crtp),
+        Just(Crudp),
+        Just(Sscopmce),
+        Just(Iplt),
+        Just(Sps),
+        Just(Pipe),
+        Just(Sctp),
+        Just(Fc),
+        Just(RsvpE2eIgnore),
+        Just(MobilityHeader),
+        Just(UdpLite),
+        Just(MplsInIp),
+        Just(Manet),
+        Just(Hip),
+        Just(Shim6),
+        Just(Wesp),
+        Just(Rohc),
+        Just(ExperimentalAndTesting0),
+        Just(ExperimentalAndTesting1)
+    ]
 }

@@ -8,8 +8,14 @@ pub struct PacketHeaders<'a> {
     pub link: Option<Ethernet2Header>,
     pub vlan: Option<VlanHeader>,
     pub ip: Option<IpHeader>,
+    /// IP Extension headers present after the ip header. 
+    ///
+    /// In case of IPV4 these can be ipsec authentication & encapsulated
+    /// security headers. In case of IPv6 these are the ipv6 extension headers.
+    /// The headers are in the same order as they are written to the packet.
+    //pub ip_extensions: [Option<IpExtensionHeader<'a>>;IP_MAX_NUM_HEADER_EXTENSIONS],
     pub transport: Option<TransportHeader>,
-    ///Rest of the packet that could not be decoded as a header (usually the payload).
+    /// Rest of the packet that could not be decoded as a header (usually the payload).
     pub payload: &'a [u8]
 }
 
@@ -75,13 +81,11 @@ impl<'a> PacketHeaders<'a> {
         match ether_type {
             IPV4 => {
                 let (ip, ip_rest) = Ipv4Header::read_from_slice(rest)?;
-
-                //cache the protocol for the next parsing layer
-                let ip_protocol = ip.protocol;
+                let (ip_ext, ip_protocol, ip_ext_rest) = Ipv4Extensions::read_from_slice(ip.protocol, ip_rest)?;
 
                 //set the ip result & rest
-                rest = ip_rest;
-                result.ip = Some(IpHeader::Version4(ip));
+                rest = ip_ext_rest;
+                result.ip = Some(IpHeader::Version4(ip, ip_ext));
 
                 //parse the transport layer
                 let (transport, transport_rest) = read_transport(ip_protocol, rest)?;
@@ -93,19 +97,11 @@ impl<'a> PacketHeaders<'a> {
             },
             IPV6 => {
                 let (ip, ip_rest) = Ipv6Header::read_from_slice(rest)?;
-
-                //cache the protocol for the next parsing layer
-                let next_header = ip.next_header;
+                let (ip_ext, next_header, ip_ext_rest) = Ipv6Extensions::read_from_slice(ip.next_header, ip_rest)?;
 
                 //set the ip result & rest
-                rest = ip_rest;
-                result.ip = Some(IpHeader::Version6(ip));
-
-                //skip the header extensions
-                let (next_header, ip_rest) = Ipv6Header::skip_all_header_extensions_in_slice(rest, next_header)?;
-                
-                //set the rest
-                rest = ip_rest;
+                rest = ip_ext_rest;
+                result.ip = Some(IpHeader::Version6(ip, ip_ext));
 
                 //parse the transport layer
                 let (transport, transport_rest) = read_transport(next_header, rest)?;
@@ -163,16 +159,7 @@ impl<'a> PacketHeaders<'a> {
         };
 
         let (transport_proto, rest) = {
-            let (ip, rest) = IpHeader::read_from_slice(packet)?;
-
-            // grab transport protocol
-            let (transport_proto, rest) = match &ip {
-                IpHeader::Version4(h) => (h.protocol, rest),
-                IpHeader::Version6(h) => {
-                    Ipv6Header::skip_all_header_extensions_in_slice(rest, h.next_header)?
-                },
-            };
-
+            let (ip, transport_proto, rest) = IpHeader::read_from_slice(packet)?;
             // update output
             result.ip = Some(ip);
             (transport_proto, rest)
@@ -183,7 +170,6 @@ impl<'a> PacketHeaders<'a> {
 
         // update output
         result.transport = transport;
-
         result.payload = rest;
 
         Ok(result)
@@ -195,9 +181,7 @@ fn read_transport(
     protocol: u8,
     rest: &[u8],
 ) -> Result<(Option<TransportHeader>, &[u8]), ReadError> {
-    use crate::IpTrafficClass::*;
-    const UDP: u8 = Udp as u8;
-    const TCP: u8 = Tcp as u8;
+    use crate::ip_number::*;
     match protocol {
         UDP => Ok(UdpHeader::read_from_slice(rest)
             .map(|value| (Some(TransportHeader::Udp(value.0)), value.1))?),

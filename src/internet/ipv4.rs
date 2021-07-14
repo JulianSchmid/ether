@@ -40,7 +40,7 @@ const IPV4_MAX_OPTIONS_LENGTH: usize = 10*4;
 
 impl Ipv4Header {
     ///Constructs an Ipv4Header with standard values for non specified values.
-    pub fn new(payload_len: u16, time_to_live: u8, protocol: IpTrafficClass, source: [u8;4], destination: [u8;4]) -> Ipv4Header {
+    pub fn new(payload_len: u16, time_to_live: u8, protocol: IpNumber, source: [u8;4], destination: [u8;4]) -> Ipv4Header {
         Ipv4Header {
             differentiated_services_code_point: 0,
             explicit_congestion_notification: 0,
@@ -160,13 +160,13 @@ impl Ipv4Header {
         let (dont_fragment, more_fragments, fragments_offset) = {
             let mut values: [u8; 2] = [0;2];
             reader.read_exact(&mut values)?;
-            (0 != (values[0] & 0x40),
-             0 != (values[0] & 0x20),
-             {
-                let buf = [values[0] & 0x1f, values[1]];
-                let mut cursor = io::Cursor::new(&buf);
-                cursor.read_u16::<BigEndian>()?
-             })
+            (
+                0 != (values[0] & 0b0100_0000),
+                0 != (values[0] & 0b0010_0000),
+                u16::from_be_bytes(
+                    [values[0] & 0b0001_1111, values[1]]
+                )
+            )
         };
         Ok(Ipv4Header{
             differentiated_services_code_point: dscp,
@@ -533,27 +533,25 @@ impl<'a> Ipv4HeaderSlice<'a> {
     }
     
     ///Returns a slice containing the ipv4 source address.
-    pub fn source(&self) -> &'a [u8] {
-        &self.slice[12..16]
+    pub fn source(&self) -> [u8;4] {
+        let s = &self.slice[12..16];
+        [s[0], s[1], s[2], s[3]]
     }
 
     ///Return the ipv4 source address as an std::net::Ipv4Addr
     pub fn source_addr(&self) -> Ipv4Addr {
-        let mut result: [u8; 4] = Default::default();
-        result.copy_from_slice(self.source());
-        Ipv4Addr::from(result)
+        Ipv4Addr::from(self.source())
     }
 
     ///Returns a slice containing the ipv4 source address.
-    pub fn destination(&self) -> &'a [u8] {
-        &self.slice[16..20]
+    pub fn destination(&self) -> [u8;4] {
+        let d = &self.slice[16..20];
+        [d[0], d[1], d[2], d[3]]
     }
 
     ///Return the ipv4 destination address as an std::net::Ipv4Addr
     pub fn destination_addr(&self) -> Ipv4Addr {
-        let mut result: [u8; 4] = Default::default();
-        result.copy_from_slice(self.destination());
-        Ipv4Addr::from(result)
+        Ipv4Addr::from(self.destination())
     }
 
     ///Returns a slice containing the ipv4 header options (empty when there are no options).
@@ -575,16 +573,8 @@ impl<'a> Ipv4HeaderSlice<'a> {
             time_to_live: self.ttl(),
             protocol: self.protocol(),
             header_checksum: self.header_checksum(),
-            source: {
-                let mut result: [u8; 4] = Default::default();
-                result.copy_from_slice(self.source());
-                result
-            },
-            destination: {
-                let mut result: [u8; 4] = Default::default();
-                result.copy_from_slice(self.destination());
-                result
-            },
+            source: self.source(),
+            destination: self.destination(),
             options_len: options.len() as u8,
             options_buffer: {
                 let mut result: [u8;40] = [0;40];

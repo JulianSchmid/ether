@@ -39,7 +39,7 @@ fn eth_ipv4_udp() {
     let mut ip_expected = Ipv4Header::new(
         expected_ip_size as u16,
         21, //ttl
-        IpTrafficClass::Udp,
+        IpNumber::Udp,
         [13,14,15,16],
         [17,18,19,20]
     );
@@ -87,7 +87,7 @@ fn ipv4_udp() {
     let mut ip_expected = Ipv4Header::new(
         expected_ip_size as u16,
         21, //ttl
-        IpTrafficClass::Udp,
+        IpNumber::Udp,
         [13,14,15,16],
         [17,18,19,20]
     );
@@ -143,7 +143,7 @@ fn ipv6_udp() {
         traffic_class: 0,
         flow_label: 0,
         payload_length: (UdpHeader::SERIALIZED_SIZE + in_payload.len()) as u16,
-        next_header: IpTrafficClass::Udp as u8,
+        next_header: ip_number::UDP,
         hop_limit: 47,
         source: [11,12,13,14,15,16,17,18,19,10,21,22,23,24,25,26],
         destination: [31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46]
@@ -173,10 +173,10 @@ fn ipv_custom_udp() {
         ip(IpHeader::Version4(Ipv4Header::new(
             0, //payload_len will be replaced during write
             12, //time_to_live
-            IpTrafficClass::Tcp, //will be replaced during write
+            IpNumber::Tcp, //will be replaced during write
             [13,14,15,16], //source
             [17,18,19,20] //destination
-        )))
+        ), Default::default()))
        .udp(22,23)
        .write(&mut serialized, &in_payload)
        .unwrap();
@@ -199,7 +199,7 @@ fn ipv_custom_udp() {
     let mut ip_expected = Ipv4Header::new(
         expected_ip_size as u16,
         12, //ttl
-        IpTrafficClass::Udp,
+        IpNumber::Udp,
         [13,14,15,16],
         [17,18,19,20]
     );
@@ -260,7 +260,7 @@ fn udp_builder_eth_ipv6_udp() {
         traffic_class: 0,
         flow_label: 0,
         payload_length: (UdpHeader::SERIALIZED_SIZE + in_payload.len()) as u16,
-        next_header: IpTrafficClass::Udp as u8,
+        next_header: ip_number::UDP,
         hop_limit: 47,
         source: [11,12,13,14,15,16,17,18,19,10,21,22,23,24,25,26],
         destination: [31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46]
@@ -330,7 +330,7 @@ fn udp_builder_eth_single_vlan_ipv4_udp() {
     let mut ip_expected = Ipv4Header::new(
         expected_ip_size as u16, //payload_len
         21, //ttl
-        IpTrafficClass::Udp,
+        IpNumber::Udp,
         [13,14,15,16],
         [17,18,19,20]
     );
@@ -411,7 +411,7 @@ fn udp_builder_eth_double_vlan_ipv6_udp() {
         traffic_class: 0,
         flow_label: 0,
         payload_length: (UdpHeader::SERIALIZED_SIZE + in_payload.len()) as u16,
-        next_header: IpTrafficClass::Udp as u8,
+        next_header: ip_number::UDP,
         hop_limit: 47,
         source: [11,12,13,14,15,16,17,18,19,10,21,22,23,24,25,26],
         destination: [31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46]
@@ -441,11 +441,11 @@ fn udp_builder_eth_ip_udp() {
                         traffic_class: 1,
                         flow_label: 2,
                         payload_length: (UdpHeader::SERIALIZED_SIZE + in_payload.len()) as u16,
-                        next_header: IpTrafficClass::Udp as u8,
+                        next_header: ip_number::UDP,
                         hop_limit: 47,
                         source: [11,12,13,14,15,16,17,18,19,10,21,22,23,24,25,26],
                         destination: [31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46]
-                    }))
+                    }, Default::default()))
                   .udp(48,49)
                   .write(&mut serialized, &in_payload)
                   .unwrap();
@@ -478,7 +478,7 @@ fn udp_builder_eth_ip_udp() {
         traffic_class: 1,
         flow_label: 2,
         payload_length: (UdpHeader::SERIALIZED_SIZE + in_payload.len()) as u16,
-        next_header: IpTrafficClass::Udp as u8,
+        next_header: ip_number::UDP,
         hop_limit: 47,
         source: [11,12,13,14,15,16,17,18,19,10,21,22,23,24,25,26],
         destination: [31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46]
@@ -514,11 +514,11 @@ fn udp_builder_eth_vlan_ip_udp() {
                         traffic_class: 1,
                         flow_label: 2,
                         payload_length: (UdpHeader::SERIALIZED_SIZE + in_payload.len()) as u16,
-                        next_header: IpTrafficClass::Udp as u8,
+                        next_header: ip_number::UDP,
                         hop_limit: 47,
                         source: [11,12,13,14,15,16,17,18,19,10,21,22,23,24,25,26],
                         destination: [31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46]
-                    }))
+                    }, Default::default()))
                   .udp(48,49)
                   .write(&mut serialized, &in_payload)
                   .unwrap();
@@ -561,7 +561,7 @@ fn udp_builder_eth_vlan_ip_udp() {
         traffic_class: 1,
         flow_label: 2,
         payload_length: (UdpHeader::SERIALIZED_SIZE + in_payload.len()) as u16,
-        next_header: IpTrafficClass::Udp as u8,
+        next_header: ip_number::UDP,
         hop_limit: 47,
         source: [11,12,13,14,15,16,17,18,19,10,21,22,23,24,25,26],
         destination: [31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46]
@@ -592,7 +592,7 @@ proptest! {
         let mut ip_expected = Ipv4Header::new(
             in_payload.len() as u16 + input.header_len(),
             21, //ttl
-            IpTrafficClass::Tcp,
+            IpNumber::Tcp,
             [13,14,15,16],
             [17,18,19,20]
         );
@@ -701,7 +701,7 @@ proptest! {
             traffic_class: 0,
             flow_label: 0,
             payload_length: (input.header_len() as usize + in_payload.len()) as u16,
-            next_header: IpTrafficClass::Tcp as u8,
+            next_header: ip_number::TCP,
             hop_limit: 47,
             source: [11,12,13,14,15,16,17,18,19,10,21,22,23,24,25,26],
             destination: [31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46]
@@ -805,7 +805,7 @@ fn tcp_options() {
     let mut serialized = Vec::new();
 
     use crate::TcpOptionElement::*;
-    let options = vec![MaximumSegmentSize(1234), Nop];
+    let options = vec![MaximumSegmentSize(1234), Noop];
 
     PacketBuilder::ethernet2([1,2,3,4,5,6],[7,8,9,10,11,12])
         .ipv4([13,14,15,16], [17,18,19,20], 21)
@@ -819,7 +819,7 @@ fn tcp_options() {
     let decoded = PacketHeaders::from_ethernet_slice(&serialized[..]).unwrap();
     let dec_options: Vec<Result<TcpOptionElement, TcpOptionReadError>> = decoded.transport.unwrap().tcp().unwrap().options_iterator().collect();
     assert_eq!(
-        &[Ok(MaximumSegmentSize(1234)), Ok(Nop)],
+        &[Ok(MaximumSegmentSize(1234)), Ok(Noop)],
         &dec_options[..]
     );
 }

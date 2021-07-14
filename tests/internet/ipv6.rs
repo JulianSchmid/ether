@@ -24,7 +24,8 @@ fn read() {
     let result = IpHeader::read(&mut cursor).unwrap();
     assert_eq!(40, cursor.position());
 
-    assert_matches!(result, IpHeader::Version6(INPUT));
+    assert_eq!(result.0, IpHeader::Version6(INPUT, Default::default()));
+    assert_eq!(result.1, INPUT.next_header);
 }
 
 #[test]
@@ -67,7 +68,7 @@ fn write_errors() {
     fn base() -> Ipv6Header {
         Ipv6Header {
             traffic_class: 1,
-            flow_label: 0x201806,
+            flow_label: 0x0,
             payload_length: 0x8021,
             next_header: 30,
             hop_limit: 40,
@@ -76,12 +77,12 @@ fn write_errors() {
             destination: [21,22,23,24,25,26,27,28,
                           29,30,31,32,33,34,35,36]
         }
-    };
+    }
 
     fn test_write(input: &Ipv6Header) -> Result<(), WriteError> {
         let mut buffer: Vec<u8> = Vec::with_capacity(20);
         input.write(&mut buffer)
-    };
+    }
     //flow label
     assert_matches!(
         test_write(&{
@@ -90,6 +91,18 @@ fn write_errors() {
             value
         }), 
         Err(ValueError(U32TooLarge{value: 0x100000, max: 0xFFFFF, field: Ipv6FlowLabel})));
+
+    //io error (not enough space)
+    {
+        let header = base();
+        for len in 0..Ipv6Header::SERIALIZED_SIZE {
+            let mut writer = TestWriter::with_max_size(len);
+            assert_eq!(
+                writer.error_kind(),
+                header.write(&mut writer).unwrap_err().io_error().unwrap().kind()
+            );
+        }
+    }
 }
 
 #[test]
@@ -100,26 +113,57 @@ fn read_error() {
         let result = Ipv6Header::read(&mut io::Cursor::new(&buffer));
         assert_matches!(result, Err(ReadError::Ipv6UnexpectedVersion(0)))
     }
-    //io error
+    //io error and unexpected end of slice
     {
-        let buffer: [u8;1] = [0x60];
-        let result = Ipv6Header::read(&mut io::Cursor::new(&buffer));
-        assert_matches!(result, Err(ReadError::IoError(_)));
+        let buffer = {
+            let mut buffer: [u8;Ipv6Header::SERIALIZED_SIZE] = [0;Ipv6Header::SERIALIZED_SIZE];
+            buffer[0] = 0x60; //ip number is needed
+            buffer
+        };
+        for len in 0..Ipv6Header::SERIALIZED_SIZE {
+            // read
+            assert_matches!(
+                Ipv6Header::read(&mut io::Cursor::new(&buffer[0..len])),
+                Err(ReadError::IoError(_))
+            );
+
+            // read from slice
+            assert_matches!(
+                Ipv6Header::read_from_slice(&buffer[0..len]),
+                Err(ReadError::UnexpectedEndOfSlice(Ipv6Header::SERIALIZED_SIZE))
+            );
+        }
+    }
+}
+
+#[test]
+fn is_skippable_header_extension() {
+    use crate::ip_number::*;
+
+    for i in 0..0xffu8 {
+        let expected = match i {
+            IPV6_HOP_BY_HOP | IPV6_ROUTE | IPV6_FRAG | AUTH | IPV6_DEST_OPTIONS | MOBILITY | HIP | SHIM6 => true,
+            _ => false
+        };
+        assert_eq!(expected, Ipv6Header::is_skippable_header_extension(i));
     }
 }
 
 #[test]
 fn skip_extension() {
-
-    const HOP_BY_HOP: u8 = IpTrafficClass::IPv6HeaderHopByHop as u8;
-    const ROUTE: u8 = IpTrafficClass::IPv6RouteHeader as u8;
-    const FRAG: u8 = IpTrafficClass::IPv6FragmentationHeader as u8;
+    use crate::ip_number::*;
 
     use std::io::Cursor;
     {
         let buffer: [u8; 8] = [0;8];
         let mut cursor = Cursor::new(&buffer);
-        assert_matches!(Ipv6Header::skip_header_extension(&mut cursor, HOP_BY_HOP), Ok(0));
+        assert_matches!(Ipv6Header::skip_header_extension(&mut cursor, ICMP), Ok(ICMP));
+        assert_eq!(0, cursor.position());
+    }
+    {
+        let buffer: [u8; 8] = [0;8];
+        let mut cursor = Cursor::new(&buffer);
+        assert_matches!(Ipv6Header::skip_header_extension(&mut cursor, IPV6_HOP_BY_HOP), Ok(0));
         assert_eq!(8, cursor.position());
     }
     {
@@ -129,7 +173,7 @@ fn skip_extension() {
             0,0,0,0, 0,0,0,0,
         ];
         let mut cursor = Cursor::new(&buffer);
-        assert_matches!(Ipv6Header::skip_header_extension(&mut cursor, ROUTE), Ok(4));
+        assert_matches!(Ipv6Header::skip_header_extension(&mut cursor, IPV6_ROUTE), Ok(4));
         assert_eq!(8*3, cursor.position());
     }
     {
@@ -140,7 +184,7 @@ fn skip_extension() {
             0,0,0,0, 0,0,0,0,
         ];
         let mut cursor = Cursor::new(&buffer);
-        assert_matches!(Ipv6Header::skip_header_extension(&mut cursor, FRAG), Ok(4));
+        assert_matches!(Ipv6Header::skip_header_extension(&mut cursor, IPV6_FRAG), Ok(4));
         assert_eq!(8, cursor.position());
     }
 }
@@ -149,24 +193,26 @@ fn skip_extension() {
 fn skip_all_extensions() {
     use crate::io::Cursor;
     //extension header values
-    use crate::IpTrafficClass::*;
+    use crate::ip_number::*;
     //based on RFC 8200 4.1. Extension Header Order
     // & IANA https://www.iana.org/assignments/ipv6-parameters/ipv6-parameters.xhtml
-    const EXTENSION_IDS: [u8;12] = [
-        IPv6HeaderHopByHop as u8,
-        IPv6DestinationOptions as u8,
-        IPv6RouteHeader as u8,
-        IPv6FragmentationHeader as u8, //3
-        IPv6AuthenticationHeader as u8,
-        IPv6EncapSecurityPayload as u8,
-        IPv6DestinationOptions as u8,
-        MobilityHeader as u8,
-        Hip as u8,
-        Shim6 as u8,
-        ExperimentalAndTesting0 as u8,
-        ExperimentalAndTesting1 as u8,
+    const EXTENSION_IDS: [u8;9] = [
+        IPV6_HOP_BY_HOP,
+        IPV6_DEST_OPTIONS,
+        IPV6_ROUTE,
+        IPV6_FRAG,
+        AUTH,
+        IPV6_DEST_OPTIONS,
+        MOBILITY,
+        HIP,
+        SHIM6,
     ];
-    const UDP: u8 = Udp as u8;
+
+    // note the following ids are extensions but are not skippable:
+    //
+    // - EncapsulatingSecurityPayload
+    // - ExperimentalAndTesting0
+    // - ExperimentalAndTesting0
 
     //no & single skipping
     {
@@ -177,8 +223,7 @@ fn skip_all_extensions() {
             1,2,3,4,   5,6,7,8,
         ];
 
-        for i_as16 in 0..((u8::max_value() as u16) + 1) {
-            let i = i_as16 as u8; //note: I would prefer to use the inclusive range ..= but this feature is not yet marked as stable -> replace when stable
+        for i in 0..=u8::max_value() {
             let mut cursor = Cursor::new(&buffer);
             let reader_result = Ipv6Header::skip_all_header_extensions(&mut cursor, i);
             let slice_result = Ipv6Header::skip_all_header_extensions_in_slice(&buffer, i).unwrap();
@@ -188,9 +233,12 @@ fn skip_all_extensions() {
                     assert_matches!(reader_result, Ok(UDP));
                     assert_matches!(slice_result.0, UDP);
 
-                    let len = if i == IPv6FragmentationHeader as u8 {
+                    let len = if i == IPV6_FRAG {
                         //fragmentation header has a fixed size
                         8
+                    } else if i == AUTH {
+                        //authentification headers use 4-octets to describe the length
+                        8 + 2*4
                     } else {
                         buffer.len() - 8
                     };
@@ -212,11 +260,12 @@ fn skip_all_extensions() {
 
     //creates an buffer filled with extension headers with the given ids
     fn create_buffer(ids: &[u8]) -> Vec<u8> {
-        const FRAG: u8 = IPv6FragmentationHeader as u8;
+        use crate::ip_number::*;
+
         let mut prev: u8 = ids[0];
         let mut result = Vec::with_capacity(ids.len()*8*4);
         for (index, value) in ids[1..].iter().enumerate() {
-            let len: u8 = if prev == FRAG {
+            let len: u8 = if prev == IPV6_FRAG {
                 0
             } else {
                 (index % 3) as u8
@@ -227,9 +276,17 @@ fn skip_all_extensions() {
             
             //fill rest with dummy data
             for _ in 0..len {
-                result.extend_from_slice(&[0, 0, 0, 0,  0, 0, 0, 0]);
+                result.extend_from_slice(
+                    if prev == AUTH {
+                        // authentification headers interpret the length as in 4-octets
+                        &[0;4]
+                    } else {
+                        // all other headers (excluding the fragmentation header) interpret the length as in 8-octets
+                        &[0;8]
+                    }
+                );
             }
-
+        
             //cache prev
             prev = *value;
         }
@@ -243,8 +300,11 @@ fn skip_all_extensions() {
     //skip maximum number
     {
         let ids = {
-            let mut ids = Vec::with_capacity(EXTENSION_IDS.len() + 1);
-            ids.extend_from_slice(&EXTENSION_IDS);
+            let mut ids = Vec::with_capacity(IPV6_MAX_NUM_HEADER_EXTENSIONS);
+            while ids.len() < IPV6_MAX_NUM_HEADER_EXTENSIONS {
+                // fill with extension headers until filled
+                ids.extend_from_slice(&EXTENSION_IDS[..std::cmp::min(EXTENSION_IDS.len(), IPV6_MAX_NUM_HEADER_EXTENSIONS - ids.len())]);
+            }
             ids.push(UDP);
             ids
         };
@@ -268,8 +328,11 @@ fn skip_all_extensions() {
     //trigger "too many" error
     {
         let ids = {
-            let mut ids = Vec::with_capacity(EXTENSION_IDS.len() + 2);
+            let mut ids = Vec::with_capacity(EXTENSION_IDS.len() + 5);
             ids.extend_from_slice(&EXTENSION_IDS);
+            ids.push(EXTENSION_IDS[0]);
+            ids.push(EXTENSION_IDS[0]);
+            ids.push(EXTENSION_IDS[0]);
             ids.push(EXTENSION_IDS[0]);
             ids.push(UDP);
             ids
@@ -297,16 +360,20 @@ fn skip_all_extensions() {
             ids
         };
         let buffer = create_buffer(&ids);
-        //reader
-        {
-            let mut cursor = Cursor::new(&buffer[..buffer.len() - 9]);
-            let result = Ipv6Header::skip_all_header_extensions(&mut cursor, ids[0]);
-            assert_matches!(result, Err(ReadError::IoError(_)));
-        }
-        //slice
-        {
-            let result = Ipv6Header::skip_all_header_extensions_in_slice(&buffer[..buffer.len() - 9], ids[0]);
-            assert_matches!(result, Err(ReadError::UnexpectedEndOfSlice(_)));
+
+        // check for all offsets
+        for len in 0..buffer.len() - 8 { // minus 8 for the dummy data
+            //reader
+            {
+                let mut cursor = TestReader::new(&buffer[..len]);
+                let result = Ipv6Header::skip_all_header_extensions(&mut cursor, ids[0]);
+                assert_matches!(result, Err(ReadError::IoError(_)));
+            }
+            //slice
+            {
+                let result = Ipv6Header::skip_all_header_extensions_in_slice(&buffer[..len], ids[0]);
+                assert_matches!(result, Err(ReadError::UnexpectedEndOfSlice(_)));
+            }
         }
     }
 }
@@ -347,6 +414,7 @@ proptest! {
         //check that all the values are read correctly
         use std::net::Ipv6Addr;
         let slice = Ipv6HeaderSlice::from_slice(&buffer).unwrap();
+        assert_eq!(slice.slice(), &buffer[..]);
         assert_eq!(slice.version(), 6);
         assert_eq!(slice.traffic_class(), input.traffic_class);
         assert_eq!(slice.flow_label(), input.flow_label);
@@ -357,6 +425,9 @@ proptest! {
         assert_eq!(slice.source_addr(), Ipv6Addr::from(input.source));
         assert_eq!(slice.destination(), input.destination);
         assert_eq!(slice.destination_addr(), Ipv6Addr::from(input.destination));
+
+        //test for derive
+        assert_eq!(slice.clone(), slice);
 
         //check that the convertion back to a header struct results in the same struct
         assert_eq!(&slice.to_header(), input);
@@ -386,80 +457,25 @@ fn from_slice_bad_version() {
 }
 
 #[test]
-fn extension_from_slice() {
-    //extension header values
-    use crate::IpTrafficClass::*;
-    const FRAG: u8 = IPv6FragmentationHeader as u8;
-    const UDP: u8 = Udp as u8;
-    let buffer: [u8; 8*3] = [
-        UDP,2,0,0, 0,0,0,0, //set next to udp
-        0,0,0,0,   0,0,0,0,
-        0,0,0,0,   0,0,0,0,
-    ];
-    //fragmentation header
-    {
-        let slice = Ipv6ExtensionHeaderSlice::from_slice(FRAG, &buffer).unwrap();
-        assert_eq!(slice.next_header(), UDP);
-        assert_eq!(slice.slice(), &buffer[..8])
-    }
-    //other headers (using length field)
-    {
-        const EXTENSION_IDS_WITH_LENGTH: [u8;5] = [
-            IPv6HeaderHopByHop as u8,
-            IPv6DestinationOptions as u8,
-            IPv6RouteHeader as u8,
-            IPv6AuthenticationHeader as u8,
-            IPv6EncapSecurityPayload as u8
-        ];
-        for id in EXTENSION_IDS_WITH_LENGTH.iter() {
-            let slice = Ipv6ExtensionHeaderSlice::from_slice(*id, &buffer).unwrap();
-            assert_eq!(slice.next_header(), UDP);
-            assert_eq!(slice.slice(), &buffer[..])
-        }
-    }
+fn dbg() {
+    let header: Ipv6Header = Default::default();
+    println!("{:?}", header);
+
+    let mut buffer: Vec<u8> = Vec::with_capacity(Ipv6Header::SERIALIZED_SIZE);
+    header.write(&mut buffer).unwrap();
+    let slice = Ipv6HeaderSlice::from_slice(&buffer[..]).unwrap();
+    println!("{:?}", slice);
 }
 
 #[test]
-fn extension_from_slice_bad_length() {
-    //extension header values
-    use crate::IpTrafficClass::*;
-    use self::ReadError::*;
-    const FRAG: u8 = IPv6FragmentationHeader as u8;
-    const UDP: u8 = Udp as u8;
-    //all extension headers that use the length field
-    const EXTENSION_IDS_WITH_LENGTH: [u8;5] = [
-        IPv6HeaderHopByHop as u8,
-        IPv6DestinationOptions as u8,
-        IPv6RouteHeader as u8,
-        IPv6AuthenticationHeader as u8,
-        IPv6EncapSecurityPayload as u8
-    ];
+fn eq() {
+    let header: Ipv6Header = Default::default();
+    assert!(header.eq(&header.clone()));
+    assert!(false == header.ne(&header.clone()));
 
-    //smaller then minimum extension header size (8 bytes)
-    {
-        let buffer: [u8; 7] = [
-            UDP,2,0,0, 0,0,0
-        ];
-        assert_matches!(Ipv6ExtensionHeaderSlice::from_slice(FRAG, &buffer), 
-                        Err(UnexpectedEndOfSlice(8)));
-    }
-    //smaller then specified size by length field
-    {
-        let buffer: [u8; 8*3-1] = [
-            UDP,2,0,0, 0,0,0,0,
-            0,0,0,0,   0,0,0,0,
-            0,0,0,0,   0,0,0,
-        ];
-        //fragmentation header (should not trigger an error, as the length field is not used)
-        {
-            let slice = Ipv6ExtensionHeaderSlice::from_slice(FRAG, &buffer).unwrap();
-            assert_eq!(slice.next_header(), UDP);
-            assert_eq!(slice.slice(), &buffer[..8])
-        }
-        //all others should generate a range error
-        for id in EXTENSION_IDS_WITH_LENGTH.iter() {
-            let slice = Ipv6ExtensionHeaderSlice::from_slice(*id, &buffer);
-            assert_matches!(slice, Err(UnexpectedEndOfSlice(_)));
-        }
-    }
+    let mut buffer: Vec<u8> = Vec::with_capacity(Ipv6Header::SERIALIZED_SIZE);
+    header.write(&mut buffer).unwrap();
+    let slice = Ipv6HeaderSlice::from_slice(&buffer[..]).unwrap();
+    assert!(slice.eq(&slice.clone()));
+    assert!(false == slice.ne(&slice.clone()));
 }

@@ -2,16 +2,20 @@ use etherparse::*;
 
 use byteorder::{ByteOrder, BigEndian};
 use super::super::*;
-
+use std::io::Cursor;
 
 proptest! {
     #[test]
     fn read_write(ref input in udp_any()) {
-        use std::io::Cursor;
-
         //serialize
-        let mut buffer: Vec<u8> = Vec::with_capacity(UdpHeader::SERIALIZED_SIZE + 1);
-        input.write(&mut buffer).unwrap();
+        let buffer = {
+            let mut buffer: Vec<u8> = Vec::with_capacity(UdpHeader::SERIALIZED_SIZE + 1);
+            input.write(&mut buffer).unwrap();
+            //add some data to test the return slice
+            buffer.push(1);
+            buffer
+        };
+
         //deserialize with read
         {
             let result = UdpHeader::read(&mut Cursor::new(&buffer)).unwrap();
@@ -20,9 +24,6 @@ proptest! {
         }
         //deserialize from slice
         {
-            //add some data to test the return slice
-            buffer.push(1);
-
             let result = UdpHeader::read_from_slice(&buffer).unwrap();
             assert_eq!(input, &result.0);
             assert_eq!(&buffer[buffer.len()-1 .. ], result.1);
@@ -36,7 +37,7 @@ fn with_ipv4_checksum() {
     let ip_header = Ipv4Header::new(
         (UdpHeader::SERIALIZED_SIZE + payload.len()) as u16,
         5,
-        IpTrafficClass::Udp, 
+        IpNumber::Udp, 
         [1,2,3,4], 
         [5,6,7,8]
     );
@@ -53,14 +54,14 @@ fn with_ipv4_checksum() {
 #[test]
 fn with_ipv4_checksum_flip() {
     let mut payload = [0,0,0,0];
-    let sum: u16 = IpTrafficClass::Udp as u16 +
+    let sum: u16 = u16::from(ip_number::UDP) +
                     (2*(UdpHeader::SERIALIZED_SIZE as u16 + 
                         payload.len() as u16));
     BigEndian::write_u16(&mut payload, 0xffff - sum);
     let ip_header = Ipv4Header::new(
         (UdpHeader::SERIALIZED_SIZE + payload.len()) as u16,
         5, 
-        IpTrafficClass::Udp, 
+        IpNumber::Udp, 
         [0,0,0,0],
         [0,0,0,0],
     );
@@ -85,7 +86,7 @@ fn with_ipv4_payload_size_check() {
     let ip_header = Ipv4Header::new(
         0,
         5, 
-        IpTrafficClass::Udp, 
+        IpNumber::Udp, 
         [1,2,3,4], 
         [5,6,7,8]
     );
@@ -138,7 +139,7 @@ fn with_ipv4_payload_size_check() {
 #[test]
 fn udp_calc_checksum_ipv4() {
     //even sized payload
-    let ipheader = Ipv4Header::new(4*3 + 8, 5, IpTrafficClass::Udp, [1,2,3,4], [5,6,7,8]);
+    let ipheader = Ipv4Header::new(4*3 + 8, 5, IpNumber::Udp, [1,2,3,4], [5,6,7,8]);
     let payload = [9,10,11,12, 13,14,15,16];
     let udp = UdpHeader {
         source_port: 1234,
@@ -161,7 +162,7 @@ fn udp_calc_checksum_ipv4_raw() {
     };
     let payload = [9,10,11,12, 13,14,15,16];
 
-    assert_eq!(42134, udp.calc_checksum_ipv4_raw([1,2,3,4], [5,6,7,8], IpTrafficClass::Udp as u8, &payload).unwrap());
+    assert_eq!(42134, udp.calc_checksum_ipv4_raw([1,2,3,4], [5,6,7,8], ip_number::UDP, &payload).unwrap());
 }
 
 #[test]
@@ -175,7 +176,7 @@ fn udp_with_ipv6_checksum() {
             traffic_class: 1,
             flow_label: 0x81806,
             payload_length: (UdpHeader::SERIALIZED_SIZE + udp_payload.len()) as u16,
-            next_header: IpTrafficClass::Udp as u8,
+            next_header: ip_number::UDP,
             hop_limit: 40,
             source: [1, 2, 3, 4, 5, 6, 7, 8,
                      9,10,11,12,13,14,15,16],
@@ -201,8 +202,8 @@ fn udp_with_ipv6_checksum() {
         assert_matches!(udp_header.calc_checksum_ipv6(&ip_header,
                                                       &udp_payload),
                         Ok(EXPECTED_CHECKSUM));
-        assert_matches!(udp_header.calc_checksum_ipv6_raw(&ip_header.source,
-                                                          &ip_header.destination,
+        assert_matches!(udp_header.calc_checksum_ipv6_raw(ip_header.source,
+                                                          ip_header.destination,
                                                           &udp_payload),
                         Ok(EXPECTED_CHECKSUM));
     }
@@ -215,7 +216,7 @@ fn udp_with_ipv6_checksum() {
             traffic_class: 1,
             flow_label: 0x81806,
             payload_length: (UdpHeader::SERIALIZED_SIZE + udp_payload.len()) as u16,
-            next_header: IpTrafficClass::Udp as u8,
+            next_header: ip_number::UDP,
             hop_limit: 40,
             source: [1, 2, 3, 4, 5, 6, 7, 8,
                      9,10,11,12,13,14,15,16],
@@ -241,8 +242,8 @@ fn udp_with_ipv6_checksum() {
         assert_matches!(udp_header.calc_checksum_ipv6(&ip_header,
                                                       &udp_payload),
                         Ok(EXPECTED_CHECKSUM));
-        assert_matches!(udp_header.calc_checksum_ipv6_raw(&ip_header.source,
-                                                          &ip_header.destination,
+        assert_matches!(udp_header.calc_checksum_ipv6_raw(ip_header.source,
+                                                          ip_header.destination,
                                                           &udp_payload),
                         Ok(EXPECTED_CHECKSUM));
     }
@@ -259,7 +260,7 @@ fn udp_with_ipv6_checksum() {
             traffic_class: 1,
             flow_label: 0x81806,
             payload_length: (UdpHeader::SERIALIZED_SIZE + udp_payload.len()) as u16,
-            next_header: IpTrafficClass::Udp as u8,
+            next_header: ip_number::UDP,
             hop_limit: 40,
             source: [0xff;16],
             destination: [0xff;16]
@@ -287,8 +288,8 @@ fn udp_with_ipv6_checksum() {
         assert_matches!(udp_header.calc_checksum_ipv6(&ip_header,
                                                       &udp_payload),
                         Ok(EXPECTED_CHECKSUM));
-        assert_matches!(udp_header.calc_checksum_ipv6_raw(&ip_header.source,
-                                                          &ip_header.destination,
+        assert_matches!(udp_header.calc_checksum_ipv6_raw(ip_header.source,
+                                                          ip_header.destination,
                                                           &udp_payload),
                         Ok(EXPECTED_CHECKSUM));
     }
@@ -302,7 +303,7 @@ fn udp_ipv6_errors() {
         traffic_class: 1,
         flow_label: 0x81806,
         payload_length: 1234,
-        next_header: IpTrafficClass::Udp as u8,
+        next_header: ip_number::UDP,
         hop_limit: 40,
         source: [0xff;16],
         destination: [0xff;16]
@@ -324,7 +325,7 @@ fn udp_ipv6_errors() {
                         Ok(_));
         assert_matches!(udp_header.calc_checksum_ipv6(&ip_header, &payload), 
                         Ok(_));
-        assert_matches!(udp_header.calc_checksum_ipv6_raw(&ip_header.source, &ip_header.destination, &payload), 
+        assert_matches!(udp_header.calc_checksum_ipv6_raw(ip_header.source, ip_header.destination, &payload), 
                         Ok(_));
     }
     //border still small enough
@@ -342,37 +343,108 @@ fn udp_ipv6_errors() {
                         Err(ValueError::UdpPayloadLengthTooLarge(OVER_MAX)));
         assert_matches!(udp_header.calc_checksum_ipv6(&ip_header, &payload), 
                         Err(ValueError::UdpPayloadLengthTooLarge(OVER_MAX)));
-        assert_matches!(udp_header.calc_checksum_ipv6_raw(&ip_header.source, &ip_header.destination, &payload), 
+        assert_matches!(udp_header.calc_checksum_ipv6_raw(ip_header.source, ip_header.destination, &payload), 
                         Err(ValueError::UdpPayloadLengthTooLarge(OVER_MAX)));
     }
 }
 
 #[test]
 fn from_slice() {
-    let input = UdpHeader {
+    let header = UdpHeader {
         source_port: 1234,
         destination_port: 5678,
         length: 1356,
         checksum: 2467
     };
-    //serialize
-    let mut buffer: Vec<u8> = Vec::with_capacity(8);
-    input.write(&mut buffer).unwrap();
-
-    //check that a too small slices generates an error
-    use crate::ReadError::*;
-    assert_matches!(
-        UdpHeaderSlice::from_slice(&buffer[..7]), 
-        Err(UnexpectedEndOfSlice(UdpHeader::SERIALIZED_SIZE))
-    );
+    let buffer = {
+        let mut buffer = Vec::with_capacity(UdpHeader::SERIALIZED_SIZE);
+        header.write(&mut buffer).unwrap();
+        buffer
+    };
 
     //get the slice
     let slice = UdpHeaderSlice::from_slice(&buffer).unwrap();
-    assert_eq!(slice.source_port(), input.source_port);
-    assert_eq!(slice.destination_port(), input.destination_port);
-    assert_eq!(slice.length(), input.length);
-    assert_eq!(slice.checksum(), input.checksum);
+
+    assert_eq!(slice.slice(), &buffer);
+
+    assert_eq!(slice.source_port(), header.source_port);
+    assert_eq!(slice.destination_port(), header.destination_port);
+    assert_eq!(slice.length(), header.length);
+    assert_eq!(slice.checksum(), header.checksum);
 
     //check that the to_header method also results in the same header
-    assert_eq!(slice.to_header(), input);
+    assert_eq!(slice.to_header(), header);
+}
+
+#[test]
+fn read_write_length_error() {
+
+    let header = UdpHeader {
+        source_port: 1234,
+        destination_port: 5678,
+        length: 1356,
+        checksum: 2467
+    };
+
+    // write with an io error (not enough space)
+    for len in 0..UdpHeader::SERIALIZED_SIZE {
+        let mut writer = TestWriter::with_max_size(len);
+        assert_eq!(
+            writer.error_kind(),
+            header.write(&mut writer).unwrap_err().io_error().unwrap().kind()
+        );
+    }
+
+    // serialize
+    let buffer = {
+        let mut buffer: Vec<u8> = Vec::with_capacity(UdpHeader::SERIALIZED_SIZE);
+        header.write(&mut buffer).unwrap();
+        buffer
+    };
+
+    // read with an length error
+    for len in 0..UdpHeader::SERIALIZED_SIZE {
+        use ReadError::*;
+        // read
+        assert_matches!(
+            UdpHeader::read(&mut Cursor::new(&buffer[..len])),
+            Err(_)
+        );
+
+        // read_from_slice
+        assert_matches!(
+            UdpHeader::read_from_slice(&buffer[..len]),
+            Err(UnexpectedEndOfSlice(UdpHeader::SERIALIZED_SIZE))
+        );
+
+        // from_slice
+        assert_matches!(
+            UdpHeaderSlice::from_slice(&buffer[..len]),
+            Err(UnexpectedEndOfSlice(UdpHeader::SERIALIZED_SIZE))
+        );
+    }
+}
+
+#[test]
+fn dbg_clone_eq() {
+    let header = UdpHeader {
+        source_port: 1234,
+        destination_port: 5678,
+        length: 1356,
+        checksum: 2467
+    };
+
+    println!("{:?}", header);
+    assert_eq!(header.clone(), header);
+
+    // write with an io error (not enough space)
+    let buffer = {
+        let mut buffer: Vec<u8> = Vec::with_capacity(UdpHeader::SERIALIZED_SIZE);
+        header.write(&mut buffer).unwrap();
+        buffer
+    };
+
+    let slice = UdpHeaderSlice::from_slice(&buffer).unwrap();
+    println!("{:?}", slice);
+    assert_eq!(slice.clone(), slice);
 }

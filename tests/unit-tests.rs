@@ -21,6 +21,16 @@ mod proptest_generators;
 pub use crate::proptest_generators::*;
 use proptest::prelude::*;
 mod packet_compositions;
+mod test_writer;
+use test_writer::*;
+mod test_reader;
+use test_reader::*;
+
+#[test]
+fn test_eq() {
+    assert_eq!(ErrorField::Ipv4PayloadLength, ErrorField::Ipv4PayloadLength);
+    assert_ne!(ErrorField::Ipv4PayloadLength, ErrorField::Ipv4Dscp);
+}
 
 #[test]
 fn test_debug_write() {
@@ -43,7 +53,7 @@ fn test_debug_write() {
         for value in [
             IoError(std::io::Error::new(std::io::ErrorKind::Other, "oh no!")),
             UnexpectedEndOfSlice(0),
-            VlanDoubleTaggingUnexpectedOuterTpid(0),
+            DoubleVlanOuterNonVlanEtherType(0),
             IpUnsupportedVersion(0),
             Ipv4UnexpectedVersion(0),
             Ipv4HeaderLengthBad(0),
@@ -99,11 +109,16 @@ fn test_debug_write() {
     }
     //PacketHeaders
     {
-        let dummy = vec![1,2,3,4];
+        let dummy = vec![1,2,3,4]; 
         let value = PacketHeaders{
             link: None,
             vlan: None,
             ip: None,
+            /*ip_extensions: [
+                None, None, None, None, None,
+                None, None, None, None, None,
+                None, None
+            ],*/
             transport: None,
             payload: &dummy[..]
         };
@@ -133,20 +148,61 @@ mod read_error {
             ReadError::UnexpectedEndOfSlice(5)
         );
         assert_matches!(
-            ReadError::VlanDoubleTaggingUnexpectedOuterTpid(2).add_slice_offset(3),
-            ReadError::VlanDoubleTaggingUnexpectedOuterTpid(2)
+            ReadError::DoubleVlanOuterNonVlanEtherType(2).add_slice_offset(3),
+            ReadError::DoubleVlanOuterNonVlanEtherType(2)
+        );
+    }
+
+    #[test]
+    fn io_error() {
+        use super::*;
+        assert_eq!(
+            std::io::ErrorKind::Other,
+            ReadError::IoError(std::io::Error::new(std::io::ErrorKind::Other, "oh no!"))
+            .io_error().unwrap().kind()
+        );
+        assert!(
+            ReadError::UnexpectedEndOfSlice(0)
+            .io_error().is_none()
+        );
+    }
+
+    #[test]
+    fn unexpected_end_of_slice_min_expected_size() {
+        use super::*;
+        assert!(
+            ReadError::IoError(std::io::Error::new(std::io::ErrorKind::Other, "oh no!"))
+            .unexpected_end_of_slice_min_expected_size().is_none()
+        );
+        assert_eq!(
+            123,
+            ReadError::UnexpectedEndOfSlice(123)
+            .unexpected_end_of_slice_min_expected_size().unwrap()
         );
     }
 }
 
 mod write_error {
     #[test]
-    fn value_error() {
+    fn io_error() {
         use super::*;
         assert_eq!(
-            None, 
+            std::io::ErrorKind::Other,
             WriteError::IoError(std::io::Error::new(std::io::ErrorKind::Other, "oh no!"))
-            .value_error()
+            .io_error().unwrap().kind()
+        );
+        assert!(
+            WriteError::ValueError(ValueError::TcpLengthTooLarge(0))
+            .io_error().is_none()
+        );
+    }
+
+    #[test]
+    fn value_error() {
+        use super::*;
+        assert!(
+            WriteError::IoError(std::io::Error::new(std::io::ErrorKind::Other, "oh no!"))
+            .value_error().is_none()
         );
         assert_eq!(
             Some(ValueError::TcpLengthTooLarge(0)),
